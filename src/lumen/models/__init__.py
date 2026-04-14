@@ -1,4 +1,4 @@
-from lumen.models.openai import (
+from lumen.models.openai_compat import (
     ChatCompletionChoice,
     ChatCompletionMessage,
     ChatCompletionRequest,
