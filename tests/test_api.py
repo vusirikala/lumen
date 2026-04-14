@@ -23,6 +23,8 @@ def _proxy_settings():
         proxy_embedding_timeout_seconds = 10.0
         proxy_max_retries = 0
         proxy_retry_backoff_seconds = 0.0
+        exact_cache_enabled = False
+        exact_cache_ttl_seconds = 300
 
     return _SettingsProxy()
 

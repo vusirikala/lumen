@@ -28,6 +28,12 @@ class Settings(BaseSettings):
     proxy_max_retries: int = 2
     proxy_retry_backoff_seconds: float = 0.2
 
+    # Exact prefix KV cache (Phase 3)
+    # Disabled by default until a Redis URL is configured and the feature is
+    # validated in your deployment. Set EXACT_CACHE_ENABLED=true to enable.
+    exact_cache_enabled: bool = False
+    exact_cache_ttl_seconds: int = 300
+
     @field_validator("inference_model_ids", mode="before")
     @classmethod
     def parse_inference_model_ids(cls, value: object) -> object:

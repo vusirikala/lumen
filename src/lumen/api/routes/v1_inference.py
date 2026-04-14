@@ -27,6 +27,16 @@ from lumen.models.openai_compat import (
     ModelInfo,
     ModelsListResponse,
 )
+import redis.asyncio as aioredis
+
+from lumen.services.cache.exact_prefix import (
+    CacheEntry,
+    canonical_prefix,
+    cache_key,
+    get_entry,
+    prefix_hash,
+    put_entry,
+)
 from lumen.settings import get_settings
 from lumen.telemetry import inference_telemetry
 
@@ -173,6 +183,77 @@ async def _proxy_stream(path: str, payload: dict[str, Any], request_id: str) -> 
     raise HTTPException(status_code=502, detail={"message": "Inference backend retry exhaustion", "request_id": request_id})
 
 
+async def _resolve_exact_cache(
+    request: Request,
+    model_id: str,
+    body: ChatCompletionRequest,
+) -> tuple[str | None, CacheEntry | None]:
+    """Compute prefix hash and attempt a Redis cache lookup.
+
+    Returns (hash_hex, entry) where either can be None:
+    - hash_hex is None  → cache is disabled or Redis unavailable
+    - entry is None     → cache miss (hash_hex still valid for registration)
+    """
+    settings = get_settings()
+    if not settings.exact_cache_enabled or settings.inference_base_url is None:
+        return None, None
+    client: aioredis.Redis | None = getattr(request.app.state, "redis", None)
+    if client is None:
+        return None, None
+    try:
+        cb = canonical_prefix(model_id, body.messages, body.tools)
+        h = prefix_hash(cb)
+        entry = await get_entry(client, model_id, h)
+        return h, entry
+    except Exception:
+        return None, None
+
+
+async def _register_exact_cache(
+    request: Request,
+    model_id: str,
+    hash_hex: str,
+) -> None:
+    """Write a cache entry after a successful response. Non-critical."""
+    settings = get_settings()
+    if settings.inference_base_url is None:
+        return
+    client: aioredis.Redis | None = getattr(request.app.state, "redis", None)
+    if client is None:
+        return
+    try:
+        await put_entry(
+            client,
+            model_id,
+            hash_hex,
+            str(settings.inference_base_url),
+            settings.exact_cache_ttl_seconds,
+        )
+    except Exception:
+        pass
+
+
+async def _stream_with_cache_register(
+    gen: AsyncIterator[bytes],
+    request: Request,
+    model_id: str,
+    hash_hex: str,
+) -> AsyncIterator[bytes]:
+    """Wrap a byte stream and register the cache entry on successful completion.
+
+    Registration happens only when the generator is fully exhausted (stream
+    completed without error or client disconnect).
+    """
+    completed = False
+    try:
+        async for chunk in gen:
+            yield chunk
+        completed = True
+    finally:
+        if completed:
+            await _register_exact_cache(request, model_id, hash_hex)
+
+
 def _prompt_preview(req: ChatCompletionRequest) -> str:
     for msg in reversed(req.messages):
         if msg.role == "user" and msg.content:
@@ -200,14 +281,21 @@ async def chat_completions(body: ChatCompletionRequest, request: Request) -> Any
     started = perf_counter()
     settings = get_settings()
     if settings.inference_base_url is not None:
+        hash_hex, cache_entry = await _resolve_exact_cache(request, selected_model, body)
+        cache_status = "hit" if cache_entry is not None else ("miss" if hash_hex is not None else "disabled")
+
         payload = body.model_dump(exclude_none=True)
         payload["model"] = selected_model
         if body.stream:
-            stream_response = StreamingResponse(
-                _proxy_stream("/v1/chat/completions", payload, request_id),
-                media_type="text/event-stream",
+            raw_stream = _proxy_stream("/v1/chat/completions", payload, request_id)
+            stream_gen = (
+                _stream_with_cache_register(raw_stream, request, selected_model, hash_hex)
+                if hash_hex is not None and cache_entry is None
+                else raw_stream
             )
+            stream_response = StreamingResponse(stream_gen, media_type="text/event-stream")
             stream_response.headers["X-Request-ID"] = request_id
+            stream_response.headers["X-Lumen-Cache"] = cache_status
             inference_telemetry.record(
                 endpoint="/v1/chat/completions",
                 model=selected_model,
@@ -224,13 +312,18 @@ async def chat_completions(body: ChatCompletionRequest, request: Request) -> Any
                 latency_ms=(perf_counter() - started) * 1000,
             )
             raise HTTPException(status_code=response.status_code, detail=_proxy_error_detail(response, request_id))
+        if hash_hex is not None and cache_entry is None:
+            await _register_exact_cache(request, selected_model, hash_hex)
         inference_telemetry.record(
             endpoint="/v1/chat/completions",
             model=selected_model,
             status_code=200,
             latency_ms=(perf_counter() - started) * 1000,
         )
-        return JSONResponse(content=response.json(), headers={"X-Request-ID": request_id})
+        return JSONResponse(
+            content=response.json(),
+            headers={"X-Request-ID": request_id, "X-Lumen-Cache": cache_status},
+        )
 
     req_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
     created = int(time.time())
