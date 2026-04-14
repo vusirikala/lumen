@@ -28,6 +28,7 @@ Open [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs) for interactive Op
 ## Configuration
 
 Environment variables are loaded via [pydantic-settings](https://docs.pydantic.dev/latest/concepts/pydantic_settings/) (optional `.env` in the project root).
+You can start from [`.env.example`](.env.example) and adapt values for your cluster.
 
 | Variable | Description |
 | --- | --- |
@@ -50,6 +51,42 @@ INFERENCE_BASE_URL=http://127.0.0.1:8001
 INFERENCE_MODEL_IDS=Qwen/Qwen2.5-7B-Instruct,Qwen/Qwen2.5-14B-Instruct,mistralai/Mistral-7B-Instruct-v0.3
 DEFAULT_MODEL_ID=Qwen/Qwen2.5-7B-Instruct
 ```
+
+### Deployment Profiles (Ampere-focused)
+
+Use these as starting points, then tune with production traffic.
+
+| Profile | Recommended model class | Typical GPUs | Suggested Lumen proxy tuning |
+| --- | --- | --- | --- |
+| Small / low-latency | 7B-8B instruct (`Qwen2.5-7B`, `Mistral-7B`) | A10/L4/A100 | `CHAT=120`, `COMPLETION=90`, `EMBED=45`, `RETRIES=1` |
+| Medium / quality | 14B-32B instruct (`Qwen2.5-14B/32B`, `Gemma-2-27B`) | A100 multi-GPU | `CHAT=180`, `COMPLETION=120`, `EMBED=60`, `RETRIES=2` |
+| Large / high-quality | MoE or larger dense models | A100 cluster | `CHAT=300`, `COMPLETION=180`, `EMBED=90`, `RETRIES=2-3` |
+
+Where `CHAT/COMPLETION/EMBED/RETRIES` map to:
+- `PROXY_CHAT_TIMEOUT_SECONDS`
+- `PROXY_COMPLETION_TIMEOUT_SECONDS`
+- `PROXY_EMBEDDING_TIMEOUT_SECONDS`
+- `PROXY_MAX_RETRIES`
+
+### Model Swap Runbook
+
+1. Update catalog/default model in `.env`:
+   - set `INFERENCE_MODEL_IDS=...`
+   - set `DEFAULT_MODEL_ID=...`
+2. Restart Lumen and verify:
+   - `GET /v1/models` includes the new model
+   - `POST /v1/chat/completions` with `model: "auto"` resolves to the default
+3. Confirm backend compatibility:
+   - run `GET /health/inference`
+   - send a smoke prompt to `/v1/chat/completions`
+
+Quick examples:
+- Qwen default:
+  - `DEFAULT_MODEL_ID=Qwen/Qwen2.5-14B-Instruct`
+- Mistral default:
+  - `DEFAULT_MODEL_ID=mistralai/Mistral-7B-Instruct-v0.3`
+- Gemma default:
+  - `DEFAULT_MODEL_ID=google/gemma-2-9b-it`
 
 Model governance behavior:
 - `INFERENCE_MODEL_IDS` must contain at least one model.
