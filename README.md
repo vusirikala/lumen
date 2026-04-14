@@ -94,6 +94,7 @@ Model governance behavior:
 - Requests with `model: "auto"` (or empty model) resolve to `DEFAULT_MODEL_ID` if set, otherwise the first configured model.
 - Unknown request model IDs return `400` unless `ALLOW_UNKNOWN_MODELS=true`.
 - Correlation IDs are propagated via `X-Request-ID` to the backend and returned in proxy responses/errors.
+- Inference routes emit structured JSON logs with `event`, `endpoint`, `model`, `status_code`, and `latency_ms`.
 
 ## HTTP API (current)
 
@@ -103,6 +104,7 @@ All paths below are served by the app. When `INFERENCE_BASE_URL` is set, generat
 | ------ | ---- | ----- |
 | `GET`  | `/health` | Liveness plus Redis and inference summary readiness statuses. |
 | `GET`  | `/health/inference` | Dedicated inference backend readiness check (`skipped`, `ok`, `unreachable`, or `unhealthy`). |
+| `GET`  | `/metrics/inference` | Baseline in-process request/error/latency metrics grouped by endpoint+model. |
 | `GET`  | `/v1/models` | Lists model IDs from `INFERENCE_MODEL_IDS`. |
 | `GET`  | `/v1/models/{model_id}` | Returns model metadata or 404. |
 | `POST` | `/v1/chat/completions` | Proxies to backend when configured; supports `stream: true` (SSE). |

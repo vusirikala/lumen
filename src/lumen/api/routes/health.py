@@ -6,6 +6,7 @@ from fastapi import APIRouter, Request
 from redis.exceptions import RedisError
 
 from lumen.settings import Settings, get_settings
+from lumen.telemetry import inference_telemetry
 
 router = APIRouter(tags=["health"])
 
@@ -49,3 +50,9 @@ async def inference_health() -> dict[str, Any]:
     settings = get_settings()
     readiness = await _inference_readiness(settings)
     return {"status": readiness["status"], "detail": readiness.get("detail")}
+
+
+@router.get("/metrics/inference")
+async def inference_metrics() -> dict[str, Any]:
+    """Baseline per-endpoint/model request, error, and latency metrics."""
+    return inference_telemetry.snapshot()

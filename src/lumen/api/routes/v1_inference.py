@@ -3,6 +3,7 @@ import json
 import time
 import uuid
 from collections.abc import AsyncIterator
+from time import perf_counter
 from typing import Any
 
 import httpx
@@ -27,6 +28,7 @@ from lumen.models.openai_compat import (
     ModelsListResponse,
 )
 from lumen.settings import get_settings
+from lumen.telemetry import inference_telemetry
 
 router = APIRouter(tags=["inference"])
 
@@ -195,6 +197,7 @@ async def retrieve_model(model_id: str) -> ModelInfo:
 async def chat_completions(body: ChatCompletionRequest, request: Request) -> Any:
     selected_model = _effective_model_id(body.model)
     request_id = _correlation_id(request)
+    started = perf_counter()
     settings = get_settings()
     if settings.inference_base_url is not None:
         payload = body.model_dump(exclude_none=True)
@@ -205,10 +208,28 @@ async def chat_completions(body: ChatCompletionRequest, request: Request) -> Any
                 media_type="text/event-stream",
             )
             stream_response.headers["X-Request-ID"] = request_id
+            inference_telemetry.record(
+                endpoint="/v1/chat/completions",
+                model=selected_model,
+                status_code=200,
+                latency_ms=(perf_counter() - started) * 1000,
+            )
             return stream_response
         response = await _proxy_request("/v1/chat/completions", payload, request_id)
         if response.status_code >= 400:
+            inference_telemetry.record(
+                endpoint="/v1/chat/completions",
+                model=selected_model,
+                status_code=response.status_code,
+                latency_ms=(perf_counter() - started) * 1000,
+            )
             raise HTTPException(status_code=response.status_code, detail=_proxy_error_detail(response, request_id))
+        inference_telemetry.record(
+            endpoint="/v1/chat/completions",
+            model=selected_model,
+            status_code=200,
+            latency_ms=(perf_counter() - started) * 1000,
+        )
         return JSONResponse(content=response.json(), headers={"X-Request-ID": request_id})
 
     req_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
@@ -219,11 +240,23 @@ async def chat_completions(body: ChatCompletionRequest, request: Request) -> Any
         content = f"{_DUMMY_CHAT_REPLY} (last user message preview: {preview!r})"
 
     if body.stream:
+        inference_telemetry.record(
+            endpoint="/v1/chat/completions",
+            model=selected_model,
+            status_code=200,
+            latency_ms=(perf_counter() - started) * 1000,
+        )
         return StreamingResponse(
             _chat_completion_sse(req_id, created, selected_model, content),
             media_type="text/event-stream",
         )
 
+    inference_telemetry.record(
+        endpoint="/v1/chat/completions",
+        model=selected_model,
+        status_code=200,
+        latency_ms=(perf_counter() - started) * 1000,
+    )
     return ChatCompletionResponse(
         id=req_id,
         created=created,
@@ -291,6 +324,7 @@ async def _chat_completion_sse(
 async def completions(body: CompletionRequest, request: Request) -> Any:
     selected_model = _effective_model_id(body.model)
     request_id = _correlation_id(request)
+    started = perf_counter()
     settings = get_settings()
     if settings.inference_base_url is not None:
         payload = body.model_dump(exclude_none=True)
@@ -301,10 +335,28 @@ async def completions(body: CompletionRequest, request: Request) -> Any:
                 media_type="text/event-stream",
             )
             stream_response.headers["X-Request-ID"] = request_id
+            inference_telemetry.record(
+                endpoint="/v1/completions",
+                model=selected_model,
+                status_code=200,
+                latency_ms=(perf_counter() - started) * 1000,
+            )
             return stream_response
         response = await _proxy_request("/v1/completions", payload, request_id)
         if response.status_code >= 400:
+            inference_telemetry.record(
+                endpoint="/v1/completions",
+                model=selected_model,
+                status_code=response.status_code,
+                latency_ms=(perf_counter() - started) * 1000,
+            )
             raise HTTPException(status_code=response.status_code, detail=_proxy_error_detail(response, request_id))
+        inference_telemetry.record(
+            endpoint="/v1/completions",
+            model=selected_model,
+            status_code=200,
+            latency_ms=(perf_counter() - started) * 1000,
+        )
         return JSONResponse(content=response.json(), headers={"X-Request-ID": request_id})
 
     req_id = f"cmpl-{uuid.uuid4().hex[:12]}"
@@ -320,11 +372,23 @@ async def completions(body: CompletionRequest, request: Request) -> Any:
     )
 
     if body.stream:
+        inference_telemetry.record(
+            endpoint="/v1/completions",
+            model=selected_model,
+            status_code=200,
+            latency_ms=(perf_counter() - started) * 1000,
+        )
         return StreamingResponse(
             _completion_sse(req_id, created, selected_model, text),
             media_type="text/event-stream",
         )
 
+    inference_telemetry.record(
+        endpoint="/v1/completions",
+        model=selected_model,
+        status_code=200,
+        latency_ms=(perf_counter() - started) * 1000,
+    )
     return CompletionResponse(
         id=req_id,
         created=created,
@@ -365,13 +429,26 @@ async def _completion_sse(
 async def embeddings(body: EmbeddingRequest, request: Request) -> Any:
     selected_model = _effective_model_id(body.model)
     request_id = _correlation_id(request)
+    started = perf_counter()
     settings = get_settings()
     if settings.inference_base_url is not None:
         payload = body.model_dump(exclude_none=True)
         payload["model"] = selected_model
         response = await _proxy_request("/v1/embeddings", payload, request_id)
         if response.status_code >= 400:
+            inference_telemetry.record(
+                endpoint="/v1/embeddings",
+                model=selected_model,
+                status_code=response.status_code,
+                latency_ms=(perf_counter() - started) * 1000,
+            )
             raise HTTPException(status_code=response.status_code, detail=_proxy_error_detail(response, request_id))
+        inference_telemetry.record(
+            endpoint="/v1/embeddings",
+            model=selected_model,
+            status_code=200,
+            latency_ms=(perf_counter() - started) * 1000,
+        )
         return JSONResponse(
             content=EmbeddingResponse.model_validate(response.json()).model_dump(),
             headers={"X-Request-ID": request_id},
@@ -389,6 +466,12 @@ async def embeddings(body: EmbeddingRequest, request: Request) -> Any:
         vec = [round((base + i * 0.01) % 1.0, 6) for i in range(_DUMMY_EMBEDDING_DIM)]
         data.append(EmbeddingData(embedding=vec, index=idx))
 
+    inference_telemetry.record(
+        endpoint="/v1/embeddings",
+        model=selected_model,
+        status_code=200,
+        latency_ms=(perf_counter() - started) * 1000,
+    )
     return EmbeddingResponse(
         data=data,
         model=selected_model,

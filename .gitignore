@@ -8,4 +8,8 @@ __pycache__
 .env.development.local
 .env.test.local
 .env.production.local
+.env.production
+.env.development
+.env.test
+.env.production.local
 .DS_Store

@@ -5,6 +5,7 @@ from fastapi import HTTPException
 from lumen.api.routes import health as health_route
 from lumen.api.routes import v1_inference
 from lumen.settings import get_settings
+from lumen.telemetry import inference_telemetry
 
 
 def _proxy_settings():
@@ -318,3 +319,30 @@ async def test_proxy_chat_stream_passthrough(client, monkeypatch) -> None:
         assert r.headers["x-request-id"] == "stream-1"
         lines = [line async for line in r.aiter_lines() if line.startswith("data: ")]
     assert any("[DONE]" in line for line in lines)
+
+
+@pytest.mark.asyncio
+async def test_inference_metrics_rows_present(client) -> None:
+    await client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "Qwen/Qwen2.5-7B-Instruct",
+            "messages": [{"role": "user", "content": "hello"}],
+        },
+    )
+    r = await client.get("/metrics/inference")
+    assert r.status_code == 200
+    body = r.json()
+    assert "rows" in body
+    assert any(
+        row["endpoint"] == "/v1/chat/completions" and row["model"] == "Qwen/Qwen2.5-7B-Instruct"
+        for row in body["rows"]
+    )
+
+
+def test_inference_telemetry_records_error_count() -> None:
+    inference_telemetry.record(endpoint="/v1/chat/completions", model="model-a", status_code=500, latency_ms=12.0)
+    snapshot = inference_telemetry.snapshot()
+    matching_rows = [row for row in snapshot["rows"] if row["endpoint"] == "/v1/chat/completions" and row["model"] == "model-a"]
+    assert matching_rows
+    assert matching_rows[0]["errors"] >= 1

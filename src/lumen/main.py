@@ -1,10 +1,13 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+import logging
 import redis.asyncio as redis
 from fastapi import FastAPI
 
 from lumen.api.routes import health, v1_inference
 from lumen.settings import get_settings
+
+logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 
 @asynccontextmanager
