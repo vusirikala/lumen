@@ -7,6 +7,25 @@ from lumen.api.routes import v1_inference
 from lumen.settings import get_settings
 
 
+def _proxy_settings():
+    original = get_settings()
+
+    class _SettingsProxy:
+        redis_url = original.redis_url
+        inference_base_url = "http://backend.local"
+        inference_api_key = None
+        inference_model_ids = original.inference_model_ids
+        default_model_id = original.default_model_id
+        allow_unknown_models = original.allow_unknown_models
+        proxy_chat_timeout_seconds = 10.0
+        proxy_completion_timeout_seconds = 10.0
+        proxy_embedding_timeout_seconds = 10.0
+        proxy_max_retries = 0
+        proxy_retry_backoff_seconds = 0.0
+
+    return _SettingsProxy()
+
+
 @pytest.mark.asyncio
 async def test_health_ok(client) -> None:
     r = await client.get("/health")
@@ -149,21 +168,6 @@ def test_settings_reject_invalid_default_model(monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_proxy_sets_request_id_header(client, monkeypatch) -> None:
-    original = get_settings()
-
-    class _SettingsProxy:
-        redis_url = original.redis_url
-        inference_base_url = "http://backend.local"
-        inference_api_key = None
-        inference_model_ids = original.inference_model_ids
-        default_model_id = original.default_model_id
-        allow_unknown_models = original.allow_unknown_models
-        proxy_chat_timeout_seconds = 10.0
-        proxy_completion_timeout_seconds = 10.0
-        proxy_embedding_timeout_seconds = 10.0
-        proxy_max_retries = 0
-        proxy_retry_backoff_seconds = 0.0
-
     async def _fake_proxy_request(path: str, payload: dict[str, object], request_id: str):
         assert path == "/v1/chat/completions"
         assert payload["model"] == "Qwen/Qwen2.5-7B-Instruct"
@@ -177,7 +181,7 @@ async def test_proxy_sets_request_id_header(client, monkeypatch) -> None:
             },
         )()
 
-    monkeypatch.setattr(v1_inference, "get_settings", lambda: _SettingsProxy())
+    monkeypatch.setattr(v1_inference, "get_settings", _proxy_settings)
     monkeypatch.setattr(v1_inference, "_proxy_request", _fake_proxy_request)
     r = await client.post(
         "/v1/chat/completions",
@@ -190,25 +194,10 @@ async def test_proxy_sets_request_id_header(client, monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_proxy_error_payload_includes_request_id(client, monkeypatch) -> None:
-    original = get_settings()
-
-    class _SettingsProxy:
-        redis_url = original.redis_url
-        inference_base_url = "http://backend.local"
-        inference_api_key = None
-        inference_model_ids = original.inference_model_ids
-        default_model_id = original.default_model_id
-        allow_unknown_models = original.allow_unknown_models
-        proxy_chat_timeout_seconds = 10.0
-        proxy_completion_timeout_seconds = 10.0
-        proxy_embedding_timeout_seconds = 10.0
-        proxy_max_retries = 0
-        proxy_retry_backoff_seconds = 0.0
-
     async def _failing_proxy_request(_path: str, _payload: dict[str, object], _request_id: str):
         raise HTTPException(status_code=502, detail={"message": "Inference backend error", "request_id": _request_id})
 
-    monkeypatch.setattr(v1_inference, "get_settings", lambda: _SettingsProxy())
+    monkeypatch.setattr(v1_inference, "get_settings", _proxy_settings)
     monkeypatch.setattr(v1_inference, "_proxy_request", _failing_proxy_request)
     r = await client.post(
         "/v1/chat/completions",
@@ -218,3 +207,114 @@ async def test_proxy_error_payload_includes_request_id(client, monkeypatch) -> N
     assert r.status_code == 502
     detail = r.json()["detail"]
     assert detail["request_id"] == "req-999"
+
+
+@pytest.mark.asyncio
+async def test_proxy_completions_success(client, monkeypatch) -> None:
+    async def _fake_proxy_request(path: str, payload: dict[str, object], request_id: str):
+        assert path == "/v1/completions"
+        assert payload["model"] == "Qwen/Qwen2.5-7B-Instruct"
+        assert request_id == "cmp-1"
+        return type(
+            "Response",
+            (),
+            {
+                "status_code": 200,
+                "json": staticmethod(lambda: {"id": "cmpl-1", "object": "text_completion", "model": payload["model"], "choices": [{"text": "ok"}]}),
+            },
+        )()
+
+    monkeypatch.setattr(v1_inference, "get_settings", _proxy_settings)
+    monkeypatch.setattr(v1_inference, "_proxy_request", _fake_proxy_request)
+    r = await client.post(
+        "/v1/completions",
+        headers={"x-request-id": "cmp-1"},
+        json={"model": "Qwen/Qwen2.5-7B-Instruct", "prompt": "hello"},
+    )
+    assert r.status_code == 200
+    assert r.headers["x-request-id"] == "cmp-1"
+    assert r.json()["object"] == "text_completion"
+
+
+@pytest.mark.asyncio
+async def test_proxy_embeddings_success(client, monkeypatch) -> None:
+    async def _fake_proxy_request(path: str, payload: dict[str, object], request_id: str):
+        assert path == "/v1/embeddings"
+        assert payload["model"] == "Qwen/Qwen2.5-7B-Instruct"
+        assert request_id == "emb-1"
+        return type(
+            "Response",
+            (),
+            {
+                "status_code": 200,
+                "json": staticmethod(
+                    lambda: {
+                        "object": "list",
+                        "data": [{"object": "embedding", "embedding": [0.1, 0.2], "index": 0}],
+                        "model": payload["model"],
+                        "usage": {"prompt_tokens": 1, "total_tokens": 1},
+                    }
+                ),
+            },
+        )()
+
+    monkeypatch.setattr(v1_inference, "get_settings", _proxy_settings)
+    monkeypatch.setattr(v1_inference, "_proxy_request", _fake_proxy_request)
+    r = await client.post(
+        "/v1/embeddings",
+        headers={"x-request-id": "emb-1"},
+        json={"model": "Qwen/Qwen2.5-7B-Instruct", "input": "hello"},
+    )
+    assert r.status_code == 200
+    assert r.headers["x-request-id"] == "emb-1"
+    assert r.json()["data"][0]["embedding"] == [0.1, 0.2]
+
+
+@pytest.mark.asyncio
+async def test_proxy_chat_backend_http_error_maps_detail(client, monkeypatch) -> None:
+    class _ErrorResponse:
+        status_code = 503
+        text = "backend unavailable"
+
+        @staticmethod
+        def json() -> dict[str, str]:
+            return {"message": "backend unavailable"}
+
+    async def _fake_proxy_request(_path: str, _payload: dict[str, object], _request_id: str):
+        return _ErrorResponse()
+
+    monkeypatch.setattr(v1_inference, "get_settings", _proxy_settings)
+    monkeypatch.setattr(v1_inference, "_proxy_request", _fake_proxy_request)
+    r = await client.post(
+        "/v1/chat/completions",
+        headers={"x-request-id": "err-1"},
+        json={"model": "Qwen/Qwen2.5-7B-Instruct", "messages": [{"role": "user", "content": "Hi"}]},
+    )
+    assert r.status_code == 503
+    detail = r.json()["detail"]
+    assert detail["message"] == "backend unavailable"
+    assert detail["request_id"] == "err-1"
+
+
+@pytest.mark.asyncio
+async def test_proxy_chat_stream_passthrough(client, monkeypatch) -> None:
+    async def _fake_proxy_stream(_path: str, _payload: dict[str, object], _request_id: str):
+        yield b"data: {\"id\":\"chunk-1\"}\n\n"
+        yield b"data: [DONE]\n\n"
+
+    monkeypatch.setattr(v1_inference, "get_settings", _proxy_settings)
+    monkeypatch.setattr(v1_inference, "_proxy_stream", _fake_proxy_stream)
+    async with client.stream(
+        "POST",
+        "/v1/chat/completions",
+        headers={"x-request-id": "stream-1"},
+        json={
+            "model": "Qwen/Qwen2.5-7B-Instruct",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "stream": True,
+        },
+    ) as r:
+        assert r.status_code == 200
+        assert r.headers["x-request-id"] == "stream-1"
+        lines = [line async for line in r.aiter_lines() if line.startswith("data: ")]
+    assert any("[DONE]" in line for line in lines)
