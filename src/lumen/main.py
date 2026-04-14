@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 import redis.asyncio as redis
 from fastapi import FastAPI
 
-from lumen.api.routes import health, v1_openai
+from lumen.api.routes import health, v1_inference
 from lumen.settings import get_settings
 
 
@@ -29,12 +29,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 def create_app() -> FastAPI:
     app = FastAPI(
         title="Lumen",
-        description="LLM inference control plane (dummy responses until backends are wired).",
+        description="LLM inference control plane with OpenAI-compatible APIs for self-hosted backends.",
         version="0.1.0",
         lifespan=lifespan,
     )
     app.include_router(health.router)
-    app.include_router(v1_openai.router, prefix="/v1")
+    app.include_router(v1_inference.router, prefix="/v1")
     return app
 
 

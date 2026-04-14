@@ -1,6 +1,6 @@
 from functools import lru_cache
 
-from pydantic import RedisDsn
+from pydantic import AnyHttpUrl, RedisDsn, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -14,6 +14,20 @@ class Settings(BaseSettings):
     )
 
     redis_url: RedisDsn | None = None
+    inference_base_url: AnyHttpUrl | None = None
+    inference_api_key: str | None = None
+    inference_model_ids: list[str] = [
+        "Qwen/Qwen2.5-7B-Instruct",
+        "mistralai/Mistral-7B-Instruct-v0.3",
+    ]
+    default_model_id: str | None = None
+
+    @field_validator("inference_model_ids", mode="before")
+    @classmethod
+    def parse_inference_model_ids(cls, value: object) -> object:
+        if isinstance(value, str):
+            return [item.strip() for item in value.split(",") if item.strip()]
+        return value
 
 
 @lru_cache

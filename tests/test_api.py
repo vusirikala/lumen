@@ -16,7 +16,7 @@ async def test_list_models(client) -> None:
     assert r.status_code == 200
     data = r.json()
     assert data["object"] == "list"
-    assert any(m["id"] == "lumen-dummy" for m in data["data"])
+    assert any(m["id"] == "Qwen/Qwen2.5-7B-Instruct" for m in data["data"])
 
 
 @pytest.mark.asyncio
@@ -24,7 +24,7 @@ async def test_chat_completion_non_stream(client) -> None:
     r = await client.post(
         "/v1/chat/completions",
         json={
-            "model": "lumen-dummy",
+            "model": "Qwen/Qwen2.5-7B-Instruct",
             "messages": [{"role": "user", "content": "Hello"}],
         },
     )
@@ -41,7 +41,7 @@ async def test_chat_completion_stream(client) -> None:
         "POST",
         "/v1/chat/completions",
         json={
-            "model": "lumen-dummy",
+            "model": "Qwen/Qwen2.5-7B-Instruct",
             "messages": [{"role": "user", "content": "Hi"}],
             "stream": True,
         },
@@ -58,7 +58,7 @@ async def test_chat_completion_stream(client) -> None:
 async def test_embeddings(client) -> None:
     r = await client.post(
         "/v1/embeddings",
-        json={"model": "lumen-dummy", "input": "hello"},
+        json={"model": "Qwen/Qwen2.5-7B-Instruct", "input": "hello"},
     )
     assert r.status_code == 200
     data = r.json()
