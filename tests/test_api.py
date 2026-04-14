@@ -324,7 +324,7 @@ async def test_proxy_chat_stream_passthrough(client, monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_inference_metrics_rows_present(client) -> None:
+async def test_metrics_endpoint_returns_prometheus_format(client) -> None:
     await client.post(
         "/v1/chat/completions",
         json={
@@ -332,19 +332,22 @@ async def test_inference_metrics_rows_present(client) -> None:
             "messages": [{"role": "user", "content": "hello"}],
         },
     )
-    r = await client.get("/metrics/inference")
+    r = await client.get("/metrics")
     assert r.status_code == 200
-    body = r.json()
-    assert "rows" in body
-    assert any(
-        row["endpoint"] == "/v1/chat/completions" and row["model"] == "Qwen/Qwen2.5-7B-Instruct"
-        for row in body["rows"]
-    )
+    assert "text/plain" in r.headers["content-type"]
+    body = r.text
+    assert "lumen_requests_total" in body
+    assert "lumen_request_duration_seconds" in body
 
 
-def test_inference_telemetry_records_error_count() -> None:
-    inference_telemetry.record(endpoint="/v1/chat/completions", model="model-a", status_code=500, latency_ms=12.0)
-    snapshot = inference_telemetry.snapshot()
-    matching_rows = [row for row in snapshot["rows"] if row["endpoint"] == "/v1/chat/completions" and row["model"] == "model-a"]
-    assert matching_rows
-    assert matching_rows[0]["errors"] >= 1
+def test_inference_telemetry_records_status_and_latency() -> None:
+    from lumen.telemetry import InferenceTelemetry
+    tel = InferenceTelemetry()
+    tel.record(endpoint="/v1/chat/completions", model="model-a", status_code=500, latency_ms=12.0)
+    content, content_type = tel.metrics_output()
+    text = content.decode()
+    assert "lumen_requests_total" in text
+    assert 'status_code="500"' in text
+    assert 'model="model-a"' in text
+    assert "lumen_request_duration_seconds" in text
+    assert "text/plain" in content_type

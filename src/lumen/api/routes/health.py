@@ -3,6 +3,7 @@ from typing import Any
 import httpx
 import redis.asyncio as redis
 from fastapi import APIRouter, Request
+from fastapi.responses import Response
 from redis.exceptions import RedisError
 
 from lumen.settings import Settings, get_settings
@@ -52,7 +53,8 @@ async def inference_health() -> dict[str, Any]:
     return {"status": readiness["status"], "detail": readiness.get("detail")}
 
 
-@router.get("/metrics/inference")
-async def inference_metrics() -> dict[str, Any]:
-    """Baseline per-endpoint/model request, error, and latency metrics."""
-    return inference_telemetry.snapshot()
+@router.get("/metrics")
+async def metrics() -> Response:
+    """Prometheus metrics exposition (text format 0.0.4)."""
+    content, content_type = inference_telemetry.metrics_output()
+    return Response(content=content, media_type=content_type)
