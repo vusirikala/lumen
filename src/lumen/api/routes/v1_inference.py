@@ -45,8 +45,18 @@ def _models_from_settings() -> list[ModelInfo]:
 def _effective_model_id(requested: str) -> str:
     settings = get_settings()
     if requested in ("", "auto"):
-        return settings.default_model_id or settings.inference_model_ids[0]
-    return requested
+        selected = settings.default_model_id or settings.inference_model_ids[0]
+    else:
+        selected = requested
+    if not settings.allow_unknown_models and selected not in settings.inference_model_ids:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Model {selected!r} is not allowed. "
+                "Choose one from INFERENCE_MODEL_IDS or set ALLOW_UNKNOWN_MODELS=true."
+            ),
+        )
+    return selected
 
 
 async def _proxy_request(path: str, payload: dict[str, Any]) -> httpx.Response:

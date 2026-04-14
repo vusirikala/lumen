@@ -1,6 +1,8 @@
 import pytest
+from pydantic import ValidationError
 
 from lumen.api.routes import health as health_route
+from lumen.settings import get_settings
 
 
 @pytest.mark.asyncio
@@ -93,3 +95,51 @@ async def test_embeddings(client) -> None:
     data = r.json()
     assert len(data["data"]) == 1
     assert len(data["data"][0]["embedding"]) == 8
+
+
+@pytest.mark.asyncio
+async def test_chat_completion_rejects_unknown_model(client) -> None:
+    r = await client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "unknown/model",
+            "messages": [{"role": "user", "content": "Hello"}],
+        },
+    )
+    assert r.status_code == 400
+    body = r.json()
+    assert "not allowed" in body["detail"]
+
+
+@pytest.mark.asyncio
+async def test_chat_completion_auto_uses_default_model(client, monkeypatch) -> None:
+    original = get_settings()
+
+    class _SettingsProxy:
+        redis_url = original.redis_url
+        inference_base_url = original.inference_base_url
+        inference_api_key = original.inference_api_key
+        inference_model_ids = original.inference_model_ids
+        default_model_id = original.inference_model_ids[1]
+        allow_unknown_models = original.allow_unknown_models
+
+    monkeypatch.setattr("lumen.api.routes.v1_inference.get_settings", lambda: _SettingsProxy())
+    r = await client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "auto",
+            "messages": [{"role": "user", "content": "Hello"}],
+        },
+    )
+    assert r.status_code == 200
+    data = r.json()
+    assert data["model"] == original.inference_model_ids[1]
+
+
+def test_settings_reject_invalid_default_model(monkeypatch) -> None:
+    monkeypatch.setenv("INFERENCE_MODEL_IDS", "Qwen/Qwen2.5-7B-Instruct")
+    monkeypatch.setenv("DEFAULT_MODEL_ID", "mistralai/Mistral-7B-Instruct-v0.3")
+    get_settings.cache_clear()
+    with pytest.raises(ValidationError, match="DEFAULT_MODEL_ID must be one of INFERENCE_MODEL_IDS"):
+        get_settings()
+    get_settings.cache_clear()

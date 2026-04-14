@@ -1,6 +1,6 @@
 from functools import lru_cache
 
-from pydantic import AnyHttpUrl, RedisDsn, field_validator
+from pydantic import AnyHttpUrl, RedisDsn, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -21,6 +21,7 @@ class Settings(BaseSettings):
         "mistralai/Mistral-7B-Instruct-v0.3",
     ]
     default_model_id: str | None = None
+    allow_unknown_models: bool = False
 
     @field_validator("inference_model_ids", mode="before")
     @classmethod
@@ -28,6 +29,14 @@ class Settings(BaseSettings):
         if isinstance(value, str):
             return [item.strip() for item in value.split(",") if item.strip()]
         return value
+
+    @model_validator(mode="after")
+    def validate_model_governance(self) -> "Settings":
+        if not self.inference_model_ids:
+            raise ValueError("INFERENCE_MODEL_IDS must contain at least one model ID")
+        if self.default_model_id is not None and self.default_model_id not in self.inference_model_ids:
+            raise ValueError("DEFAULT_MODEL_ID must be one of INFERENCE_MODEL_IDS")
+        return self
 
 
 @lru_cache

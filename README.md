@@ -36,6 +36,7 @@ Environment variables are loaded via [pydantic-settings](https://docs.pydantic.d
 | `INFERENCE_API_KEY` | Optional bearer token forwarded to the backend as `Authorization: Bearer ...`. |
 | `INFERENCE_MODEL_IDS` | Comma-separated model IDs exposed by `/v1/models` (for example `Qwen/Qwen2.5-7B-Instruct,mistralai/Mistral-7B-Instruct-v0.3`). |
 | `DEFAULT_MODEL_ID` | Optional default model used when requests set `model` to `auto` or empty. |
+| `ALLOW_UNKNOWN_MODELS` | Defaults to `false`. When `false`, request models must be in `INFERENCE_MODEL_IDS`; when `true`, unknown model IDs are passed through to backend. |
 
 Example `.env` for vLLM:
 
@@ -44,6 +45,12 @@ INFERENCE_BASE_URL=http://127.0.0.1:8001
 INFERENCE_MODEL_IDS=Qwen/Qwen2.5-7B-Instruct,Qwen/Qwen2.5-14B-Instruct,mistralai/Mistral-7B-Instruct-v0.3
 DEFAULT_MODEL_ID=Qwen/Qwen2.5-7B-Instruct
 ```
+
+Model governance behavior:
+- `INFERENCE_MODEL_IDS` must contain at least one model.
+- `DEFAULT_MODEL_ID` must belong to `INFERENCE_MODEL_IDS` when set.
+- Requests with `model: "auto"` (or empty model) resolve to `DEFAULT_MODEL_ID` if set, otherwise the first configured model.
+- Unknown request model IDs return `400` unless `ALLOW_UNKNOWN_MODELS=true`.
 
 ## HTTP API (current)
 
