@@ -6,8 +6,8 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx
-from fastapi import APIRouter, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from lumen.models.openai_compat import (
     ChatCompletionChoice,
@@ -35,6 +35,7 @@ _DUMMY_CHAT_REPLY = (
     "Set INFERENCE_BASE_URL to forward to your vLLM inference service."
 )
 _DUMMY_EMBEDDING_DIM = 8
+_RETRYABLE_STATUS_CODES = {429, 502, 503, 504}
 
 
 def _models_from_settings() -> list[ModelInfo]:
@@ -59,7 +60,14 @@ def _effective_model_id(requested: str) -> str:
     return selected
 
 
-async def _proxy_request(path: str, payload: dict[str, Any]) -> httpx.Response:
+def _correlation_id(request: Request) -> str:
+    incoming = request.headers.get("x-request-id")
+    if incoming:
+        return incoming
+    return uuid.uuid4().hex
+
+
+def _backend_url(path: str) -> str:
     settings = get_settings()
     if settings.inference_base_url is None:
         raise HTTPException(
@@ -69,42 +77,98 @@ async def _proxy_request(path: str, payload: dict[str, Any]) -> httpx.Response:
                 "Set INFERENCE_BASE_URL to route /v1 requests to vLLM."
             ),
         )
-    headers: dict[str, str] = {}
-    if settings.inference_api_key is not None:
-        headers["Authorization"] = f"Bearer {settings.inference_api_key}"
-    url = f"{str(settings.inference_base_url).rstrip('/')}{path}"
-    async with httpx.AsyncClient(timeout=120.0) as client:
-        try:
-            response = await client.post(url, json=payload, headers=headers)
-        except httpx.HTTPError as exc:
-            raise HTTPException(status_code=502, detail=f"Inference backend error: {exc}") from exc
-    return response
+    return f"{str(settings.inference_base_url).rstrip('/')}{path}"
 
 
-async def _proxy_stream(path: str, payload: dict[str, Any]) -> AsyncIterator[bytes]:
+def _proxy_headers(request_id: str) -> dict[str, str]:
     settings = get_settings()
-    if settings.inference_base_url is None:
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                "Inference backend is not configured. "
-                "Set INFERENCE_BASE_URL to route /v1 requests to vLLM."
-            ),
-        )
     headers: dict[str, str] = {}
     if settings.inference_api_key is not None:
         headers["Authorization"] = f"Bearer {settings.inference_api_key}"
-    url = f"{str(settings.inference_base_url).rstrip('/')}{path}"
+    headers["X-Request-ID"] = request_id
+    return headers
+
+
+def _timeout_for_path(path: str) -> httpx.Timeout:
+    settings = get_settings()
+    if path == "/v1/chat/completions":
+        total = settings.proxy_chat_timeout_seconds
+    elif path == "/v1/completions":
+        total = settings.proxy_completion_timeout_seconds
+    else:
+        total = settings.proxy_embedding_timeout_seconds
+    return httpx.Timeout(total, connect=min(total, 5.0))
+
+
+def _proxy_error_detail(response: httpx.Response, request_id: str) -> dict[str, Any]:
     try:
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            async with client.stream("POST", url, json=payload, headers=headers) as response:
-                if response.status_code >= 400:
-                    error_body = await response.aread()
-                    raise HTTPException(status_code=response.status_code, detail=error_body.decode("utf-8"))
-                async for chunk in response.aiter_bytes():
-                    yield chunk
-    except httpx.HTTPError as exc:
-        raise HTTPException(status_code=502, detail=f"Inference backend error: {exc}") from exc
+        backend_payload = response.json()
+    except ValueError:
+        backend_payload = {"message": response.text}
+    if not isinstance(backend_payload, dict):
+        backend_payload = {"message": str(backend_payload)}
+    backend_payload["request_id"] = request_id
+    return backend_payload
+
+
+async def _proxy_request(path: str, payload: dict[str, Any], request_id: str) -> httpx.Response:
+    settings = get_settings()
+    url = _backend_url(path)
+    headers = _proxy_headers(request_id)
+    timeout = _timeout_for_path(path)
+    attempts = settings.proxy_max_retries + 1
+    for attempt in range(1, attempts + 1):
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                response = await client.post(url, json=payload, headers=headers)
+        except httpx.HTTPError as exc:
+            if attempt < attempts:
+                await asyncio.sleep(settings.proxy_retry_backoff_seconds * attempt)
+                continue
+            raise HTTPException(
+                status_code=502,
+                detail={"message": f"Inference backend error: {exc}", "request_id": request_id},
+            ) from exc
+        if response.status_code in _RETRYABLE_STATUS_CODES and attempt < attempts:
+            await asyncio.sleep(settings.proxy_retry_backoff_seconds * attempt)
+            continue
+        return response
+    raise HTTPException(status_code=502, detail={"message": "Inference backend retry exhaustion", "request_id": request_id})
+
+
+async def _proxy_stream(path: str, payload: dict[str, Any], request_id: str) -> AsyncIterator[bytes]:
+    settings = get_settings()
+    url = _backend_url(path)
+    headers = _proxy_headers(request_id)
+    timeout = _timeout_for_path(path)
+    attempts = settings.proxy_max_retries + 1
+    for attempt in range(1, attempts + 1):
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                async with client.stream("POST", url, json=payload, headers=headers) as response:
+                    if response.status_code in _RETRYABLE_STATUS_CODES and attempt < attempts:
+                        await response.aread()
+                        await asyncio.sleep(settings.proxy_retry_backoff_seconds * attempt)
+                        continue
+                    if response.status_code >= 400:
+                        raise HTTPException(
+                            status_code=response.status_code,
+                            detail=_proxy_error_detail(response, request_id),
+                        )
+                    async for chunk in response.aiter_bytes():
+                        yield chunk
+                    return
+        except HTTPException:
+            raise
+        except httpx.HTTPError as exc:
+            if attempt < attempts:
+                await asyncio.sleep(settings.proxy_retry_backoff_seconds * attempt)
+                continue
+            raise HTTPException(
+                status_code=502,
+                detail={"message": f"Inference backend error: {exc}", "request_id": request_id},
+            ) from exc
+    raise HTTPException(status_code=502, detail={"message": "Inference backend retry exhaustion", "request_id": request_id})
 
 
 def _prompt_preview(req: ChatCompletionRequest) -> str:
@@ -128,21 +192,24 @@ async def retrieve_model(model_id: str) -> ModelInfo:
 
 
 @router.post("/chat/completions")
-async def chat_completions(body: ChatCompletionRequest) -> Any:
+async def chat_completions(body: ChatCompletionRequest, request: Request) -> Any:
     selected_model = _effective_model_id(body.model)
+    request_id = _correlation_id(request)
     settings = get_settings()
     if settings.inference_base_url is not None:
         payload = body.model_dump(exclude_none=True)
         payload["model"] = selected_model
         if body.stream:
-            return StreamingResponse(
-                _proxy_stream("/v1/chat/completions", payload),
+            stream_response = StreamingResponse(
+                _proxy_stream("/v1/chat/completions", payload, request_id),
                 media_type="text/event-stream",
             )
-        response = await _proxy_request("/v1/chat/completions", payload)
+            stream_response.headers["X-Request-ID"] = request_id
+            return stream_response
+        response = await _proxy_request("/v1/chat/completions", payload, request_id)
         if response.status_code >= 400:
-            raise HTTPException(status_code=response.status_code, detail=response.text)
-        return response.json()
+            raise HTTPException(status_code=response.status_code, detail=_proxy_error_detail(response, request_id))
+        return JSONResponse(content=response.json(), headers={"X-Request-ID": request_id})
 
     req_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
     created = int(time.time())
@@ -221,21 +288,24 @@ async def _chat_completion_sse(
 
 
 @router.post("/completions")
-async def completions(body: CompletionRequest) -> Any:
+async def completions(body: CompletionRequest, request: Request) -> Any:
     selected_model = _effective_model_id(body.model)
+    request_id = _correlation_id(request)
     settings = get_settings()
     if settings.inference_base_url is not None:
         payload = body.model_dump(exclude_none=True)
         payload["model"] = selected_model
         if body.stream:
-            return StreamingResponse(
-                _proxy_stream("/v1/completions", payload),
+            stream_response = StreamingResponse(
+                _proxy_stream("/v1/completions", payload, request_id),
                 media_type="text/event-stream",
             )
-        response = await _proxy_request("/v1/completions", payload)
+            stream_response.headers["X-Request-ID"] = request_id
+            return stream_response
+        response = await _proxy_request("/v1/completions", payload, request_id)
         if response.status_code >= 400:
-            raise HTTPException(status_code=response.status_code, detail=response.text)
-        return response.json()
+            raise HTTPException(status_code=response.status_code, detail=_proxy_error_detail(response, request_id))
+        return JSONResponse(content=response.json(), headers={"X-Request-ID": request_id})
 
     req_id = f"cmpl-{uuid.uuid4().hex[:12]}"
     created = int(time.time())
@@ -292,16 +362,20 @@ async def _completion_sse(
 
 
 @router.post("/embeddings")
-async def embeddings(body: EmbeddingRequest) -> Any:
+async def embeddings(body: EmbeddingRequest, request: Request) -> Any:
     selected_model = _effective_model_id(body.model)
+    request_id = _correlation_id(request)
     settings = get_settings()
     if settings.inference_base_url is not None:
         payload = body.model_dump(exclude_none=True)
         payload["model"] = selected_model
-        response = await _proxy_request("/v1/embeddings", payload)
+        response = await _proxy_request("/v1/embeddings", payload, request_id)
         if response.status_code >= 400:
-            raise HTTPException(status_code=response.status_code, detail=response.text)
-        return EmbeddingResponse.model_validate(response.json())
+            raise HTTPException(status_code=response.status_code, detail=_proxy_error_detail(response, request_id))
+        return JSONResponse(
+            content=EmbeddingResponse.model_validate(response.json()).model_dump(),
+            headers={"X-Request-ID": request_id},
+        )
 
     if isinstance(body.input, str):
         inputs = [body.input]

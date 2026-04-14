@@ -22,6 +22,11 @@ class Settings(BaseSettings):
     ]
     default_model_id: str | None = None
     allow_unknown_models: bool = False
+    proxy_chat_timeout_seconds: float = 120.0
+    proxy_completion_timeout_seconds: float = 120.0
+    proxy_embedding_timeout_seconds: float = 60.0
+    proxy_max_retries: int = 2
+    proxy_retry_backoff_seconds: float = 0.2
 
     @field_validator("inference_model_ids", mode="before")
     @classmethod
