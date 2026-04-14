@@ -51,7 +51,8 @@ All paths below are served by the app. When `INFERENCE_BASE_URL` is set, generat
 
 | Method | Path | Notes |
 | ------ | ---- | ----- |
-| `GET`  | `/health` | Liveness; optional Redis ping when `REDIS_URL` is set. |
+| `GET`  | `/health` | Liveness plus Redis and inference summary readiness statuses. |
+| `GET`  | `/health/inference` | Dedicated inference backend readiness check (`skipped`, `ok`, `unreachable`, or `unhealthy`). |
 | `GET`  | `/v1/models` | Lists model IDs from `INFERENCE_MODEL_IDS`. |
 | `GET`  | `/v1/models/{model_id}` | Returns model metadata or 404. |
 | `POST` | `/v1/chat/completions` | Proxies to backend when configured; supports `stream: true` (SSE). |

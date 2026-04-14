@@ -1,5 +1,7 @@
 import pytest
 
+from lumen.api.routes import health as health_route
+
 
 @pytest.mark.asyncio
 async def test_health_ok(client) -> None:
@@ -8,6 +10,33 @@ async def test_health_ok(client) -> None:
     body = r.json()
     assert body["status"] == "ok"
     assert body["redis"] == "skipped"
+    assert body["inference"] == "skipped"
+
+
+@pytest.mark.asyncio
+async def test_inference_health_ok(client, monkeypatch) -> None:
+    async def _ok_readiness(_settings):
+        return {"status": "ok"}
+
+    monkeypatch.setattr(health_route, "_inference_readiness", _ok_readiness)
+    r = await client.get("/health/inference")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "ok"
+    assert body["detail"] is None
+
+
+@pytest.mark.asyncio
+async def test_inference_health_unreachable(client, monkeypatch) -> None:
+    async def _unreachable_readiness(_settings):
+        return {"status": "unreachable", "detail": "connection refused"}
+
+    monkeypatch.setattr(health_route, "_inference_readiness", _unreachable_readiness)
+    r = await client.get("/health/inference")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "unreachable"
+    assert body["detail"] == "connection refused"
 
 
 @pytest.mark.asyncio
